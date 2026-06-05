@@ -5,9 +5,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.models.configuration_model import GPTConfig
+from models.configuration_model import GPTConfig
 
 
+class Linear(nn.Linear):
+    """nn.Linear that casts weights to match input dtype in forward.
+    Replaces autocast: master weights stay fp32 for optimizer precision,
+    but matmuls run in the activation dtype (typically bf16 from embeddings)."""
+    def forward(self, x):
+        return F.linear(x, self.weight.to(dtype=x.dtype))
+    
 class Conv1D(nn.Module):
     """
     1D-convolutional layer as defined by Radford et al. for OpenAI GPT (and also used in GPT-2).
@@ -210,7 +217,6 @@ class Block(nn.Module):
         
         return x
         
-    
 class GPT(nn.Module):
     """GPT 模型"""
     def __init__(self,config: GPTConfig):

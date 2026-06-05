@@ -61,8 +61,8 @@ def print_banner():
     """
     print0(banner)
     
-class DummyWandb:
-    """Useful if we wish to not use wandb but have all the same signatures"""
+class DummySwanLab:
+    """Useful if we wish to not use swanlab but have all the same signatures"""
     def __init__(self):
         pass
     def log(self, *args, **kwargs):
