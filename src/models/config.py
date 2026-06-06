@@ -9,6 +9,7 @@ class GPTConfig:
     #     "num_attention_heads": "n_head",
     #     "num_hidden_layers": "n_layer",
     # }
+    
     model_type = "GPT-2"
     # model scale parameters
     n_positions:int=1024 # 最大上下文长度
@@ -16,8 +17,9 @@ class GPTConfig:
     n_embd:int=768 # word embedding/hidden 维度
     n_layer:int=12 # Transformer块 层数
     n_head:int=12 # 多头注意力头数，n_embd // n_head= 64，每个头的维度为64
+    n_kv_head:int=2
     
-    n_inner :int|None=4*n_embd # 前馈网络中间层维度
+    n_inner :int=4*n_embd # 前馈网络中间层维度
     
     # activation & normalization parameters
     activation_function:str="relu"
@@ -42,6 +44,7 @@ class GPTConfig:
     scale_attn_by_inverse_layer_idx:bool=True # 是否按层索引的倒数缩放注意力权重
     reorder_and_upcast_attn=False # 不重排、提升精度计算注意力    
     
+    lm_tokenizer:str=""
     # special tokens
     bos_token_id=5026 # 开始符 token id，用于表示序列的开始
     eos_token_id=5026 # 介绍符 token id,用于表示序列的结束,默认与开始符相同
@@ -50,6 +53,15 @@ class GPTConfig:
     # 结构开关
     add_cross_attention:bool=False # 是否添加跨注意力机制
     tie_word_embeddings=True # 是否将 word embedding 层和 output 层的权重共享(GPT经典做法，为了省参数量)
+    
+    
+    rotary_emb_base:float=0. # 旋转位置编码基数
+    attn_scaling:float=0. # 注意力机制缩放
+    
+    lm_use_tokens:bool=False # 输入张量。若`lm_use_tokens`为真，该参数需传入形状为(bsz,seq_len)的token索引；若为假，则需传入形状为(bsz,seq_len,n_embd)的嵌入向量。
+    lm_tie_weights:bool=True # 权重绑定开关
+    
+    
 
     
 @dataclass
@@ -76,4 +88,10 @@ class SigLIPConfig(GPTConfig):
     image_size: int | list[int] | tuple[int, int] = 224
     patch_size: int | list[int] | tuple[int, int] = 16    
     vit_cls_flag: bool = False
+    
+    vit_n_embd:int=64
+    mp_pixel_shuffle_factor:int=2
+    
+    vlm_extra_tokens:str=""
+    lm_chat_template:str=""
     

@@ -3,7 +3,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from configuration_model import SigLIPConfig
+from models.config import SigLIPConfig
 
 class ViTPatchEmbeddings(nn.Module):
     # Ref:[SigLIP](https://github.com/huggingface/transformers/blob/main/src/transformers/models/siglip/modeling_siglip.py#L245)

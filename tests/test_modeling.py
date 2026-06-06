@@ -20,7 +20,7 @@ from src.models.gpt import (
     Block,
     GPT
 )
-from src.models.configuration_model import GPTConfig
+from models.config import GPTConfig
 
 def test_conv1d():
     """测试Conv1D层"""

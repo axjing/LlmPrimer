@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from models.configuration_model import GPTConfig
+from models.config import GPTConfig
 from src.model import GPT
 from src.trainer import Trainer
 from src.inference import TextGenerator, ChatBot

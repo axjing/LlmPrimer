@@ -26,7 +26,7 @@ import torch
 import torch.distributed as dist
 
 from models.gpt import GPT, GPTConfig, Linear
-from common.dataset import tokenizing_distributed_data_loader_bos_bestfit, tokenizing_distributed_data_loader_with_state_bos_bestfit
+from data.dataset import tokenizing_distributed_data_loader_bos_bestfit, tokenizing_distributed_data_loader_with_state_bos_bestfit
 from common.distributed import compute_init, compute_cleanup,autodetect_device_type,get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
 from common.logger import  print0, DummySwanLab, print_banner
 

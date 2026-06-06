@@ -1,9 +1,20 @@
+from typing import Any
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from models.configuration_model import GPTConfig
+from src.models.config import GPTConfig
+from src.models.position_embedding import apply_rotary_postision_embd
 
+
+class Linear(nn.Linear):
+    """nn.Linear that casts weights to match input dtype in forward.
+    Replaces autocast: master weights stay fp32 for optimizer precision,
+    but matmuls run in the activation dtype (typically bf16 from embeddings)."""
+    def forward(self, x):
+        return F.linear(x, self.weight.to(dtype=x.dtype))
 class Conv1D(nn.Module):
     """
     1D-convolutional layer as defined by Radford et al. for OpenAI GPT (and also used in GPT-2).
@@ -66,7 +77,7 @@ class LayerNorm(nn.Module):
         super().__init__()
         self.normalized_shape=normalized_shape
         self.eps=eps
-        self.bias=bias
+        self.bias = nn.Parameter(torch.zeros(normalized_shape)) if bias else None
         self.device=device
         
         self.weight=nn.Parameter(torch.ones(normalized_shape))
@@ -93,7 +104,7 @@ class RMSNorm(nn.Module):
     
     def __init__(self,cfg:GPTConfig):
         super().__init__()
-        self.weight=nn.Parameter(torch.ones(cfg.n_inner))
+        self.weight=nn.Parameter(torch.ones(cfg.n_embd))
         self.eps=cfg.layer_norm_epsilon
     
     def forward(self,x: torch.Tensor):
@@ -114,13 +125,13 @@ class RMSNorm(nn.Module):
 
 class CausalSelfAttention(nn.Module):
 
-    def __init__(self, config: GPTConfig,is_cross_attention:bool=False,ctrl_flash:bool=True):
+    def __init__(self, cfg: GPTConfig,is_cross_attention:bool=False,ctrl_flash:bool=True):
         super().__init__()
         self.is_cross_attention=is_cross_attention
         
-        self.config=config
-        self.n_embd=config.n_embd
-        self.n_head=config.n_head
+        self.config=cfg
+        self.n_embd=cfg.n_embd
+        self.n_head=cfg.n_head
         self.head_dim=self.n_embd//self.n_head
         self.split_size = self.n_embd
         if self.head_dim*self.n_head!=self.n_embd:
@@ -135,8 +146,8 @@ class CausalSelfAttention(nn.Module):
         self.c_proj=Conv1D(self.n_embd,self.n_embd)
         print(f"c_proj {self.c_proj}")
         # regularization
-        self.attn_pdrop=config.attn_pdrop
-        self.resid_pdrop=config.resid_pdrop
+        self.attn_pdrop=cfg.attn_pdrop
+        self.resid_pdrop=cfg.resid_pdrop
         self.attn_dropout = nn.Dropout(self.attn_pdrop)
         self.resid_dropout = nn.Dropout(self.resid_pdrop)
         
@@ -145,10 +156,10 @@ class CausalSelfAttention(nn.Module):
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if  not self.flash or not self.ctrl_flash:
-            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
+            print("WARNING: scaled dot product attention not available, using slow attention. Flash Attention requires PyTorch >= 2.0")
             # causal mask to ensure that attention is only applied to the left in the input sequence
-            self.register_buffer("bias", torch.tril(torch.ones(config.n_positions, config.n_positions))
-                                        .view(1, 1, config.n_positions, config.n_positions))
+            self.register_buffer("bias", torch.tril(torch.ones(cfg.n_positions, cfg.n_positions))
+                                        .view(1, 1, cfg.n_positions, cfg.n_positions))
             
         # attn scale factor
         self.scaling =  self.head_dim**(-0.5)
@@ -196,19 +207,201 @@ class CausalSelfAttention(nn.Module):
         y=self.c_proj(attn_output)
         y=self.resid_dropout(y)
         
-        
-        
         return y,attn_weights
+
+class GroupedQueryAttention(nn.Module):
+    """
+    Implements Grouped Query Attention (GQA) as used in some transformer-based language models.
+
+    GQA reduces computation by using fewer key-value heads than query heads,
+    grouping multiple query heads to share the same key-value heads.
+
+    Args:
+        cfg: Configuration object containing:
+            - lm_n_heads (int): Number of query heads.
+            - lm_n_kv_heads (int): Number of key-value heads.
+            - lm_hidden_dim (int): Hidden embedding dimension.
+            - lm_dropout (float): Dropout rate.
+    """
+    
+    def __init__(self, cfg: GPTConfig) -> None:
+        super().__init__()
+        self.n_head=cfg.n_head
+        self.n_kv_head=cfg.n_kv_head
+        self.n_embd=cfg.n_embd
+        self.dropout=cfg.dropout
+        
+        assert self.n_head % self.n_kv_head == 0, "n_heads must be divisible by n_kv_heads"
+        assert self.n_embd % self.n_head == 0, "n_embd must be divisible by num_heads"
+        
+        self.n_kv_groups=self.n_head//self.n_kv_head
+        self.head_dim=self.n_embd//self.n_head
+        
+        self.q_attn=nn.Linear(self.n_embd,self.n_embd,bias=False)
+        self.k_attn=nn.Linear(self.n_embd,self.head_dim*self.n_kv_head,bias=False)
+        self.v_attn=nn.Linear(self.n_embd,self.head_dim*self.n_kv_head,bias=False)
+        
+        self.c_proj=nn.Linear(self.n_embd,self.n_embd,bias=False)
+        
+        self.attn_dropout=nn.Dropout(cfg.attn_pdrop)
+        self.resid_dropout=nn.Dropout(cfg.resid_pdrop)
+        
+        self.sdpa=hasattr(torch.nn.functional,"scaled_dot_product_attention")
+        if not self.sdpa:
+            print("WARNING: scaled dot product attention not available,using slow attention. Flash Attention requires PyTorch >= 2.0")
+            # causal mask to ensure that attention is only applied to the left in the input sequence
+            # self.register_buffer("bias", torch.tril(torch.ones(cfg.n_positions, cfg.n_positions))
+            #                             .view(1, 1, cfg.n_positions, cfg.n_positions))
+    
+    def forward(self,x: torch.Tensor,cos:torch.Tensor,sin:torch.Tensor,attention_mask:None,block_kv_cache:dict|None) -> tuple[torch.Tensor, dict]:
+        """
+        Forward pass for grouped query attention.
+
+        Args:
+            x (Tensor): Input tensor of shape (B, seq_len, C), where
+                        B = batch size,
+                        seq_len = current sequence length,
+                        C = embedding dimension.
+            cos (Tensor): Rotary embedding cosines, shape compatible with q and k.
+            sin (Tensor): Rotary embedding sines, shape compatible with q and k.
+            attention_mask (Tensor, optional): Attention mask tensor of shape (B, total_kv_length),
+                                               with 1 for tokens to attend to and 0 for padding.
+            block_kv_cache (dict, optional): Cache dict with 'key' and 'value' tensors for autoregressive decoding.
+
+        Returns:
+            tuple[Tensor, dict]:
+                - Output tensor after attention and projection, shape (B, seq_len, C).
+                - Updated block_kv_cache dict for caching key-value states.
+        """
+        is_prefill = block_kv_cache is None
+        bsz,seq_len,n_embd=x.size() # seq_len is the sequence length of the current input x
+        
+        q_cur=self.q_attn(x).view(bsz,seq_len,self.n_head,n_embd//self.n_head).transpose(1,2) # (bsz,n_head,seq_len,head_dim)
+        k_cur=self.k_attn(x).view(bsz,seq_len,self.n_kv_head,n_embd//self.n_head).transpose(1,2) # (bsz,n_head,seq_len,head_dim)
+        v_cur=self.v_attn(x).view(bsz,seq_len,self.n_kv_head,n_embd//self.n_head).transpose(1,2) # (bsz,n_head,seq_len,head_dim)
+        
+        # Apply rotary embeddings to the current q and k
+        q_rotated,k_rotated=apply_rotary_postision_embd(q_cur,k_cur,cos,sin)
+        
+        # check if we can use cached keys and values
+        if not is_prefill and block_kv_cache['key'] is not None:
+            # Concatenate with cached K,V
+            # k_rotated and v are for the new token(s)
+            k=block_kv_cache['key']
+            v=block_kv_cache['value']
+            k=torch.cat([k,k_rotated],dim=2)
+            v=torch.cat([v,v_cur],dim=2)
+            block_kv_cache['key']=k
+            block_kv_cache['value']=v
+        else:
+            # No cache,this is the first pass(prefill)
+            k=k_rotated
+            v=v_cur
+            block_kv_cache={"key":k,"value":v}
+        # Repeat K, V for Grouped Query Attention
+        k_exp = k.repeat_interleave(self.n_kv_groups, dim=1) # (bsz, n_head, T_kv, head_dim)
+        v_exp = v.repeat_interleave(self.n_kv_groups, dim=1) # (bsz, n_heads, T_kv, head_dim)
+        T_kv = k_exp.size(2) # Total sequence length of keys/values
+
+        # Prepare attention mask for SDPA or manual path
+        # attention_mask is (B, T_kv_total_length), 1 for attend, 0 for pad
+        additive_attn_mask = None
+        if attention_mask is not None:
+            # The current `attention_mask` parameter is assumed to be `[B, total_sequence_length_kv]`
+            # Let's make it `[B, 1, 1, T_kv]` for SDPA.
+            mask_for_keys = attention_mask[:, :T_kv] # Ensure mask matches key length [B, T_kv]
+            additive_attn_mask = (1.0 - mask_for_keys.unsqueeze(1).unsqueeze(2).float()) * torch.finfo(q_rotated.dtype).min
+            # This additive_attn_mask shape is [B, 1, 1, T_kv]
+
+        if self.sdpa and x.device.type != 'mps':
+            # During decode, no additional masking needed as [1, T_kv] is naturally causal
+            is_causal = (seq_len == T_kv and seq_len > 1)
+            y = torch.nn.functional.scaled_dot_product_attention(
+                q_rotated, k_exp, v_exp,
+                attn_mask=additive_attn_mask, 
+                dropout_p=self.dropout if self.training else 0.0,
+                is_causal=is_causal
+            )
+        else:
+            # Manual attention implementation
+            attn = torch.matmul(q_rotated, k_exp.transpose(2, 3)) / math.sqrt(self.head_dim) # (bsz, n_head, seq_len, T_kv)
+            # During decode: no additional masking needed as [1, T_kv] is naturally causal
+            if seq_len == T_kv and seq_len > 1:
+                causal_mask_val = torch.tril(torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool)).view(1, 1, seq_len, seq_len)
+                attn = attn.masked_fill(~causal_mask_val, float('-inf'))
+
+            if additive_attn_mask is not None: # Additive padding mask
+                # additive_attn_mask is [B,1,1,T_kv], needs to be broadcast to [B, n_heads, seq_len, T_kv]
+                attn = attn + additive_attn_mask 
+
+            attn = F.softmax(attn, dim=-1)
+            attn = self.attn_dropout(attn)
+            y = attn @ v_exp
+            
+        y = y.transpose(1, 2).contiguous().view(bsz, seq_len, n_embd)
+        y = self.c_proj(y)
+        y = self.resid_dropout(y)
+
+        return y, block_kv_cache
+        
+
+class LlamaMLP(nn.Module):
+    """
+    ref:https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py#L160
+    Implements the feed-forward network (MLP) block used in transformer-based language models.
+
+    This MLP uses a gated activation mechanism where two separate linear projections
+    are applied to the input: one passed through an activation function (gate_proj),
+    and the other as is (up_proj). Their element-wise product is then projected back
+    to the embedding dimension (down_proj).
+
+    Args:
+        cfg: Configuration object containing:
+            - lm_hidden_dim (int): The embedding dimension size.
+            - lm_inter_dim (int): The intermediate dimension size for the MLP.
+
+    Attributes:
+        activation_fn (Callable): The activation function used (SiLU).
+        gate_proj (nn.Linear): Linear projection for gating pathway.
+        up_proj (nn.Linear): Linear projection for upscaling pathway.
+        down_proj (nn.Linear): Linear projection for downscaling back to embedding dim.
+    """
+    def __init__(self,cfg: GPTConfig):
+        super().__init__()
+        self.n_embd=cfg.n_embd
+        self.n_inner=cfg.n_inner
+        
+        self.activation_fn=F.silu # cfg.activation_function
+        self.gate_proj = nn.Linear(self.n_embd, self.n_inner, bias=False)
+        self.up_proj = nn.Linear(self.n_embd, self.n_inner, bias=False)
+        self.down_proj = nn.Linear(self.n_inner, self.n_embd, bias=False)
+    
+    def forward(self, x):
+        """
+        Forward pass through the gated MLP block.
+
+        Args:
+            x (Tensor): Input tensor of shape (batch_size, seq_length, embd_dim).
+
+        Returns:
+            Tensor: Output tensor of shape (batch_size, seq_length, embd_dim),
+                    after gated MLP transformation.
+        """
+        gate = self.activation_fn(self.gate_proj(x))
+        x = self.up_proj(x)
+        x = self.down_proj(gate * x)
+
+        return x
 
 class MLP(nn.Module):
     """MLP 层"""
-    def __init__(self,config: GPTConfig):
+    def __init__(self,cfg: GPTConfig):
         super().__init__()
         
-        self.c_fc=Conv1D(config.n_embd,config.n_embd*4)
-        self.c_proj=Conv1D(config.n_embd*4,config.n_embd)
+        self.c_fc=Conv1D(cfg.n_embd,cfg.n_embd*4)
+        self.c_proj=Conv1D(cfg.n_embd*4,cfg.n_embd)
         self.activate_fn=nn.GELU()
-        self.resid_dropout = nn.Dropout(config.resid_pdrop)
+        self.resid_dropout = nn.Dropout(cfg.resid_pdrop)
         
     def forward(self,x):
         x=self.c_fc(x)
@@ -219,14 +412,14 @@ class MLP(nn.Module):
     
 class Block(nn.Module):
     """Block 层"""
-    def __init__(self,config: GPTConfig):
+    def __init__(self,cfg: GPTConfig):
         super().__init__()
-        self.ln_1=LayerNorm(config.n_embd,bias=config.bias)
-        self.attn=CausalSelfAttention(config)
-        self.ln_2=LayerNorm(config.n_embd,bias=config.bias)
+        self.ln_1=LayerNorm(cfg.n_embd,bias=cfg.bias)
+        self.attn=CausalSelfAttention(cfg)
+        self.ln_2=LayerNorm(cfg.n_embd,bias=cfg.bias)
         
         
-        self.mlp=MLP(config)
+        self.mlp=MLP(cfg)
     
     def forward(self,x:torch.Tensor)->torch.Tensor:
         residual=x
