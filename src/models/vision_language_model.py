@@ -27,6 +27,7 @@ class VisionLanguageModel(nn.Module):
         if load_backbone:
             print("Load from backbone weights")
             self.vision_encoder= ViT.from_pretrained(cfg)
+            self.decoder = LlamaTransformer.from_pretrained(cfg)
         else:
             self.vision_encoder=ViT(cfg)
             self.decoder=LlamaTransformer(cfg)
