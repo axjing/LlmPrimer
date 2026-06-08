@@ -223,7 +223,10 @@ class LlamaTransformer(nn.Module):
         cfg.n_embd=hf_config.hidden_size
         cfg.n_intermediate=hf_config.intermediate_size
         cfg.layer_norm_epsilon=hf_config.rms_norm_eps
-        cfg.rotary_emb_base=hf_config.rope_theta
+        # Handle different naming conventions for RoPE theta across versions
+        cfg.rotary_emb_base=getattr(hf_config, 'rope_theta', getattr(hf_config, 'rope_scaling', 10000.0))
+        if isinstance(cfg.rotary_emb_base, dict):
+            cfg.rotary_emb_base = cfg.rotary_emb_base.get('factor', 10000.0)
         cfg.n_positions=hf_config.max_position_embeddings
         
         cfg.n_heads=hf_config.num_attention_heads
