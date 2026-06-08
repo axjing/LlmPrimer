@@ -43,7 +43,7 @@ from src.data.processors import get_image_processor,get_tokenizer
 from src.models.config import VLMConfig
 from src.models.vision_language_model import VisionLanguageModel
 
-from src.trainer.distributed import is_dist,dist_gather,dist_mean_scalar,get_world_size, is_master,get_rank,wrap_model,init_dist
+from src.trainer.distributed import is_dist,dist_gather,dist_mean_scalar,get_world_size, is_master,get_rank,wrap_model,init_dist,destroy_dist
 from src.trainer.config import TrainConfig
 # 解决 Python PIL/Pillow 库打开部分 PNG 图片时报 Decompressed data too large（解压数据过大） 的报错，是处理超大文本块 PNG 的通用修复方案
 from PIL import PngImagePlugin
