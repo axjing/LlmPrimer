@@ -41,8 +41,8 @@ class ViTPatchEmbeddings(nn.Module):
         if self.cls_flag:
             cls_token=self.cls_token.expand(x.shape[0],-1,-1)
             x=torch.cat((cls_token,x),dim=1)
-        print(f"self.position_embedding:{self.position_embedding.shape}")
-        print(x.shape)
+        # print(f"self.position_embedding:{self.position_embedding.shape}")
+        # print(x.shape)
         x=x+self.position_embedding
         
         return x

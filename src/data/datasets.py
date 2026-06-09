@@ -503,7 +503,7 @@ class CollatorBase(object):
             'input_ids':torch.stack(batch['input_ids']),
             'attention_mask':torch.stack(batch['attention_mask']),
             'images':batch['images'],
-            'labels':batch['labels'],
+            'labels':torch.stack(batch['labels']),
         }
             
     

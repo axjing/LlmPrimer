@@ -208,6 +208,9 @@ class LlamaTransformer(nn.Module):
         # Store original HF vocab size before we modify it
         original_vocab_size=hf_config.vocab_size
         print(f"Original vocabulary size from pretrained model: {original_vocab_size}")
+        
+        
+        
         # We're keeping our own vocab size in cfg, but checking it's larger than original
         if hasattr(cfg,'vocab_size'):
             if cfg.vocab_size < original_vocab_size:
@@ -231,8 +234,10 @@ class LlamaTransformer(nn.Module):
         
         cfg.n_heads=hf_config.num_attention_heads
         cfg.n_kv_heads=hf_config.num_key_value_heads
-        cfg.dropout=hf_config.num_hidden_layers
-        
+        cfg.dropout=hf_config.attention_dropout
+        cfg.n_layers=hf_config.num_hidden_layers
+        print(f"====> cfg:{cfg}")
+        print(f"====> hf_config: {hf_config}")
         # Create our model with potentially larger vocabulary
         model=cls(cfg)
         
@@ -285,7 +290,7 @@ class LlamaTransformer(nn.Module):
                         continue
                     
                     if hf_key in f.keys() and our_key in sd:
-                        tensor=f.get_tenor(hf_key)
+                        tensor=f.get_tensor(hf_key)
                         
                         # Special handling for token embeddings if vocab sizes differ
                         if hf_key=='model.embed_tokens.weight' and tensor.shape[0] != sd[our_key].shape[0]:
@@ -303,9 +308,9 @@ class LlamaTransformer(nn.Module):
                             sd['head.weight'].copy_(sd[our_key])  # Update the head weights as well
                         elif tensor.shape==sd[our_key].shape:
                             sd[our_key].copy_(tensor)
-                        sd[our_key].copy_(tensor)
-                    else:
-                        print(f"Shape mismatch for {hf_key} -> {our_key}: {tensor.shape} vs {sd[our_key].shape}")
+                        
+                        else:
+                            print(f"Shape mismatch for {hf_key} -> {our_key}: {tensor.shape} vs {sd[our_key].shape}")
                     
                     loaded_keys.add(our_key)
         for hf_key, our_key in mapping.items():
@@ -317,7 +322,7 @@ class LlamaTransformer(nn.Module):
         model.load_state_dict(sd)
         
         # Handle output projection / language modeling head
-        if has_extended_embeddings and hasattr(model, 'head') and 'head.weight' in sd:
+        if has_extended_embedding and hasattr(model, 'head') and 'head.weight' in sd:
             # If we have a separate output projection layer and extended the vocab
             # we should handle it similarly to the input embeddings
             lm_head_loaded = False
