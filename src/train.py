@@ -29,7 +29,7 @@ from src.models.layers import Linear
 from src.models.config import LLMConfig
 from src.models.gpt import GPT
 from src.data.datasets import tokenizing_distributed_data_loader_bos_bestfit, tokenizing_distributed_data_loader_with_state_bos_bestfit
-from src.trainer.distributed import compute_init, compute_cleanup,autodetect_device_type,get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
+from src.trainer.distributed import compute_init, destory_ddp_process_group,autodetect_device_type,get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
 from src.common.logger import  print0, DummySwanLab, print_banner
 
 from src.common.file_os import get_base_dir
@@ -632,4 +632,4 @@ get_report().log(section="Base model training", data=[
 
 # cleanup
 swanlab_run.finish() # swanlab run finish
-compute_cleanup()
+destory_ddp_process_group()

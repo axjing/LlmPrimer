@@ -2,7 +2,8 @@ import os
 # 关闭 **Hugging Face Tokenizers 分词器的多线程并行**，避免多进程/多线程场景下出现警告、死锁或性能异常。
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # 开启 PyTorch CUDA **可扩展显存分段分配**，优化GPU显存管理，减少显存碎片、降低OOM（显存溢出）概率，提升显存利用率。
-os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+# os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+os.environ['PYTORCH_ALLOC_CONF'] = 'expandable_segments:True'
 
 import traceback
 import warnings
@@ -43,7 +44,7 @@ from src.data.processors import get_image_processor,get_tokenizer
 from src.models.config import VLMConfig
 from src.models.vision_language_model import VisionLanguageModel
 
-from src.trainer.distributed import is_dist,dist_gather,dist_mean_scalar,get_world_size, is_master,get_rank,wrap_model,init_dist,destory_dist
+from src.trainer.distributed import is_ddp_initialized,distributed_gather,distributed_mean_scalar,get_world_size, is_master,get_rank,wrap_model,init_dist,destory_ddp_process_group
 from src.trainer.config import TrainConfig
 # 解决 Python PIL/Pillow 库打开部分 PNG 图片时报 Decompressed data too large（解压数据过大） 的报错，是处理超大文本块 PNG 的通用修复方案
 from PIL import PngImagePlugin
@@ -104,7 +105,12 @@ def get_dataloaders(train_cfg: TrainConfig,vlm_cfg: VLMConfig):
                 continue
         
         try:
-            train_dataset=load_dataset(train_cfg.train_dataset_path,dataset_name,streaming=train_cfg.stream_dataset,on_bad_files='warn')['train']
+            train_dataset=load_dataset(
+                train_cfg.train_dataset_path,
+                dataset_name,
+                streaming=train_cfg.stream_dataset,
+                on_bad_files='warn'
+                )['train']
             if train_cfg.stream_dataset:
                 next(iter(train_dataset)) # Check if the dataset is loaded correctly
             else:
@@ -125,7 +131,7 @@ def get_dataloaders(train_cfg: TrainConfig,vlm_cfg: VLMConfig):
         print("# Shuffle the training dataset, so train and val get equal contributions from all concatenated datasets  ")
         train_dataset=train_dataset.shuffle(seed=0)
     
-    if is_dist():  # We need to shard the dataset in DDP since we are using an iterable dataset instead of the distributed sampler
+    if is_ddp_initialized():  # We need to shard the dataset in DDP since we are using an iterable dataset instead of the distributed sampler
         train_dataset = train_dataset.shard(num_shards=get_world_size(), index=get_rank())
     
     print("# train_dataset = train_dataset.shuffle(buffer_size=10000, seed=0) # Shuffle the training dataset, so train and val get equal contributions from all concatenated datasets")
@@ -194,8 +200,8 @@ def get_dataloaders(train_cfg: TrainConfig,vlm_cfg: VLMConfig):
         train_dataset,
         batch_size=train_cfg.batch_size,    # =per device BS in DDP
         collate_fn=vqa_collator,
-        num_workers=1,
-        timeout=3600,
+        num_workers=3,
+        # timeout=600,
         pin_memory=True,
         persistent_workers=False,
         drop_last=True,
@@ -208,7 +214,7 @@ def get_dataloaders(train_cfg: TrainConfig,vlm_cfg: VLMConfig):
         batch_size=train_cfg.batch_size,
         collate_fn=vqa_collator,
         num_workers=1,
-        timeout=3600,
+        # timeout=600,
         pin_memory=True,
         persistent_workers=False,
         drop_last=True,
@@ -258,7 +264,7 @@ def train(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
     
     train_loader, val_loader, iter_train_loader, iter_val_loader = get_dataloaders(train_cfg, vlm_cfg)
 
-    if is_dist():
+    if is_ddp_initialized():
         print("Rank", get_rank(), "Waiting for all workers to get dataloaders...")
         if is_master():
             print("Waiting for all workers to get dataloaders...")
@@ -290,11 +296,11 @@ def train(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
     
     if is_master():
         print(f"VLM initialized with {sum(p.numel() for p in model.parameters()):,} parameters") 
-        print(f"Training summary {'(global)' if is_dist() else ''}: {-1*get_world_size()} samples, batch size {int(train_cfg.batch_size*get_world_size()*train_cfg.gradient_accumulation_steps)}{', training on ' + str(get_world_size()) + ' GPUs' if is_dist() else ''}")
-        if is_dist():
+        print(f"Training summary {'(global)' if is_ddp_initialized() else ''}: {-1*get_world_size()} samples, batch size {int(train_cfg.batch_size*get_world_size()*train_cfg.gradient_accumulation_steps)}{', training on ' + str(get_world_size()) + ' GPUs' if is_ddp_initialized() else ''}")
+        if is_ddp_initialized():
             print(f"Training summary per GPU: batch size {train_loader.batch_size}")
-        print(f"Validation summary{' (global)' if is_dist() else ''}: {-1*get_world_size()} samples, batch size {int(train_cfg.batch_size*get_world_size()*train_cfg.gradient_accumulation_steps)}{', training on ' + str(get_world_size()) + ' GPUs' if is_dist() else ''}")
-        if is_dist():
+        print(f"Validation summary{' (global)' if is_ddp_initialized() else ''}: {-1*get_world_size()} samples, batch size {int(train_cfg.batch_size*get_world_size()*train_cfg.gradient_accumulation_steps)}{', training on ' + str(get_world_size()) + ' GPUs' if is_ddp_initialized() else ''}")
+        if is_ddp_initialized():
             print(f"Validation summary per GPU: batch size {val_loader.batch_size}")
 
     pstr2="""
@@ -341,7 +347,7 @@ def train(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
     
     if train_cfg.compile:
         model = torch.compile(model)
-    if is_dist():
+    if is_ddp_initialized():
         print("Wrapping model for DDP")
         model = wrap_model(model)
         print("Model wrapped for DDP")
@@ -372,7 +378,7 @@ def train(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
         data_load_start = time.time()
 
         print("Starting training loop")
-        for i, batch in enumerate(synchronized_dataloader_step(iter_train_loader, is_dist())):
+        for i, batch in enumerate(synchronized_dataloader_step(iter_train_loader, is_ddp_initialized())):
             is_update_step = (i + 1) % train_cfg.gradient_accumulation_steps == 0
             batch_start_time = time.time()
             images = batch["images"]
@@ -384,7 +390,7 @@ def train(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
             # When using DDP with gradient accumulation,
             # skip gradient synchronization on intermediate steps to save time.
             # Gradients only need to be synced at the end of each accumulation cycle.
-            if (is_dist()
+            if (is_ddp_initialized()
                 and train_cfg.gradient_accumulation_steps > 1
                 and not is_update_step):
                 context = model.no_sync()
@@ -461,7 +467,7 @@ def train(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
                 with torch.no_grad():
                     total_val_loss = 0
                     val_batches = 0
-                    for batch in synchronized_dataloader_step(iter_val_loader, is_dist()):
+                    for batch in synchronized_dataloader_step(iter_val_loader, is_ddp_initialized()):
                         if val_batches > 64:
                             print(f"Evaluated {val_batches} batches")
                             break
@@ -478,13 +484,13 @@ def train(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
                     
                     iter_val_loader = iter(val_loader)
                     avg_val_loss = total_val_loss / val_batches if val_batches > 0 else 0
-                    avg_val_loss = mean(dist_gather(avg_val_loss)) if is_dist() else avg_val_loss
+                    avg_val_loss = mean(distributed_gather(avg_val_loss)) if is_ddp_initialized() else avg_val_loss
 
                     checkpoint_path_step = ""
                     if is_master():
                         # Save a checkpoint for this evaluation step
                         checkpoint_path_step = os.path.join(vlm_cfg.vlm_checkpoint_path, run_name, f"step_{global_step}")
-                        save_model = model.module if is_dist() else model # unwrap the model for saving if DDP
+                        save_model = model.module if is_ddp_initialized() else model # unwrap the model for saving if DDP
                         save_model.save_pretrained(save_directory=checkpoint_path_step)
 
                         if train_cfg.use_lmms_eval and global_step % (train_cfg.eval_interval*2) == 0:
@@ -510,23 +516,23 @@ def train(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
                 # ALL RANKS: Perform collective operations for training stats
                 stats = {}
                 for key in ['tokens_per_second', 'data_load_time', 'fw_bw_time', 'post_process_time', 'images_per_sample']:
-                    if is_dist():
-                        all_values = dist_gather(accumulated_stats[key])
+                    if is_ddp_initialized():
+                        all_values = distributed_gather(accumulated_stats[key])
                         all_values_flat = [item for sublist in all_values for item in sublist]  # Flatten list of lists
                         stats[f'avg_{key}'] = mean(all_values_flat)
                     else:
                         stats[f'avg_{key}'] = mean(accumulated_stats[key])
                 
                 for key in ['data_load_time', 'fw_bw_time', 'post_process_time', 'images_per_sample']:
-                    if is_dist():
-                        all_values = dist_gather(accumulated_stats[key])
+                    if is_ddp_initialized():
+                        all_values = distributed_gather(accumulated_stats[key])
                         all_values_flat = [item for sublist in all_values for item in sublist]
                         stats[f'max_{key}'] = max(all_values_flat)
                     else:
                         stats[f'max_{key}'] = max(accumulated_stats[key])
 
-                if is_dist():
-                    all_images_values = dist_gather(accumulated_stats['images_per_sample'])
+                if is_ddp_initialized():
+                    all_images_values = distributed_gather(accumulated_stats['images_per_sample'])
                     all_images_flat = [item for sublist in all_images_values for item in sublist]
                     stats['min_images_per_sample'] = min(all_images_flat)
                 else:
@@ -576,8 +582,8 @@ def train(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
             # Log batch loss  
             if is_update_step:
                 # ALL RANKS: gather loss from all ranks if DDP
-                if is_dist():
-                    batch_loss_gathered = dist_mean_scalar(batch_loss)
+                if is_ddp_initialized():
+                    batch_loss_gathered = distributed_mean_scalar(batch_loss)
                 else:
                     batch_loss_gathered = batch_loss
                     
@@ -597,14 +603,14 @@ def train(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
         iter_train_loader = iter(train_loader)
         avg_train_loss = total_train_loss / i
         # gather average batch loss from all ranks if DDP
-        avg_train_loss = mean(dist_gather(avg_train_loss)) if is_dist() else avg_train_loss  
+        avg_train_loss = mean(distributed_gather(avg_train_loss)) if is_ddp_initialized() else avg_train_loss  
 
         epoch_end_time = time.time()
         epoch_duration = epoch_end_time - epoch_start_time
         epoch_times.append(epoch_duration)
 
         # gather and sum total_tokens_processed across all ranks if DDP
-        total_tokens_processed = sum(dist_gather(total_tokens_processed)) if is_dist() else total_tokens_processed  
+        total_tokens_processed = sum(distributed_gather(total_tokens_processed)) if is_ddp_initialized() else total_tokens_processed  
         epoch_tokens_per_second = total_tokens_processed / epoch_duration
 
         if is_master():
@@ -697,8 +703,8 @@ def main():
 
     train(train_cfg, vlm_cfg)
 
-    if is_dist():
-        destory_dist()
+    if is_ddp_initialized():
+        destory_ddp_process_group()
 
 if __name__ == "__main__":
     main()

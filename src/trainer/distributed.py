@@ -4,30 +4,23 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 
-
-    
+ 
 def init_dist():
     dist.init_process_group(backend='nccl',timeout=timedelta(minutes=30))
     local_rank=int(os.environ['LOCAL_RANK'])
     torch.cuda.set_device(local_rank)
     # torch.cuda.manual_seed(0)
-    
-def destory_dist():
-    dist.destroy_process_group()
-    
-def is_dist():
-    return dist.is_available() and dist.is_initialized()
-
+   
 def is_master():
-    return dist.get_rank()==0 if is_dist() else True
+    return dist.get_rank()==0 if is_ddp_initialized() else True
 
 def get_world_size():
-    return dist.get_world_size() if is_dist() else 1
+    return dist.get_world_size() if is_ddp_initialized() else 1
 
 def get_rank():
-    return dist.get_rank() if is_dist() else 0
+    return dist.get_rank() if is_ddp_initialized() else 0
 
-def dist_gather(obj):
+def distributed_gather(obj):
     """
     无需分配临时CUDA缓冲区，从所有进程编号中收集**任意**可序列化对象。返回列表格式为[编号0对象、编号1对象……]。
 
@@ -41,7 +34,7 @@ def dist_gather(obj):
     
     return result
 
-def dist_mean_scalar(x:float|int)->float:
+def distributed_mean_scalar(x:float|int)->float:
     if not (dist.is_available and dist.is_initialized):
         return float(x)
     
@@ -149,7 +142,7 @@ def compute_init(device_type="cuda"): # cuda|cpu|mps
 
 	return is_ddp_requested, ddp_rank, ddp_local_rank, ddp_world_size, device
 
-def compute_cleanup():
+def destory_ddp_process_group():
 	"""
 	清理分布式训练环境，在脚本退出前销毁进程组
 	
