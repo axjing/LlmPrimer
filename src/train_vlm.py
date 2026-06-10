@@ -33,6 +33,7 @@ if torch.cuda.is_available:
     torch.cuda.manual_seed_all(0)
 
 from datasets import load_dataset, concatenate_datasets, get_dataset_config_names, load_from_disk
+from datasets import config as datasets_config
 
 PG_CPU=None
 
@@ -94,7 +95,10 @@ def get_dataloaders(train_cfg: TrainConfig,vlm_cfg: VLMConfig):
     print('Load and combine all training datasets...')
     combined_train_data=[]
     for dataset_name in dataset_name_to_load:
+        
+        print(f'>>>Loading dataset: {train_cfg.train_dataset_path} ...')
         print(f'>>>Loading dataset: {dataset_name} ...')
+        
         if 'shard_' in dataset_name:
             try:
                 train_dateset=load_from_disk(dataset_name)
@@ -111,6 +115,9 @@ def get_dataloaders(train_cfg: TrainConfig,vlm_cfg: VLMConfig):
                 streaming=train_cfg.stream_dataset,
                 on_bad_files='warn'
                 )['train']
+            print(f"datasets 全局缓存根目录：{datasets_config.HF_DATASETS_CACHE}")
+            print(f"数据集详情信息：\n{train_dataset.info}")
+            print(f"本地数据文件路径：{train_dataset._data_files}")
             if train_cfg.stream_dataset:
                 next(iter(train_dataset)) # Check if the dataset is loaded correctly
             else:
