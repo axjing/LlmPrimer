@@ -37,7 +37,7 @@ from datasets import config as datasets_config
 
 PG_CPU=None
 
-from src.data.datasets import VQADataset,VQACollator
+from src.data.vqa_datasets import VQADataset,VQACollator
 from src.data.data_utils import synchronized_dataloader_step
 from src.data.datasets_advanced import ConstantLengthDataset
 from src.data.processors import get_image_processor,get_tokenizer

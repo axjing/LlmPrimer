@@ -26,7 +26,7 @@ import torch.distributed as dist
 from src.models.layers import Linear
 from src.models.config import LLMConfig
 from src.models.gpt import GPT
-from src.data.datasets import tokenizing_distributed_data_loader_bos_bestfit, tokenizing_distributed_data_loader_with_state_bos_bestfit
+from data.text_pretrain_loader import tokenizing_distributed_data_loader_bos_bestfit, tokenizing_distributed_data_loader_with_state_bos_bestfit
 from src.trainer.distributed import (
     compute_init, destory_ddp_process_group, autodetect_device_type,
     get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized,

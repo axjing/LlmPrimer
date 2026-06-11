@@ -11,7 +11,7 @@ import os
 import argparse
 import time
 import requests
-import tokenizers
+import pyarrow.parquet as pq
 from multiprocessing import Pool
 from src.common.file_os import get_base_dir
 # -----------------------------------------------------------------------------
