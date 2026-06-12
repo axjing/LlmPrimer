@@ -8,10 +8,10 @@ import json
 import logging
 import torch
 
-from common.file_os import get_base_dir
-from models.gpt import GPT, LLMConfig
-from common.tokenizer import get_tokenizer
-from common.logger import setup_default_logging
+from src.common.file_os import get_base_dir
+from src.models.gpt import GPT, LLMConfig
+from src.common.tokenizer import get_tokenizer
+from src.common.logger import setup_default_logging
 
 # Set up logging
 setup_default_logging()

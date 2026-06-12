@@ -29,8 +29,9 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler
 torch.manual_seed(0)
-if torch.cuda.is_available:
+if torch.cuda.is_available():
     torch.cuda.manual_seed_all(0)
+from src.common.logger import logger
 
 from datasets import load_dataset, concatenate_datasets, get_dataset_config_names, load_from_disk
 from datasets import config as datasets_config
@@ -74,17 +75,20 @@ def get_run_name(train_cfg:TrainConfig,vlm_cfg:VLMConfig):
     
 
 def get_dataloaders(train_cfg: TrainConfig,vlm_cfg: VLMConfig):
-    print(f'Getting dataloaders form {train_cfg.train_dataset_path}')
-    
+    if is_master():
+        logger.info(f'Getting dataloaders from {train_cfg.train_dataset_path}')
+
     # Create datasets
-    print('Create datasets')
+    if is_master():
+        logger.info('Create datasets')
     image_processor=get_image_processor(vlm_cfg.max_img_size,vlm_cfg.image_size,vlm_cfg.resize_to_max_side_len)
     
     tokenizer=get_tokenizer(vlm_cfg.lm_tokenizer,vlm_cfg.vlm_extra_tokens,vlm_cfg.lm_chat_template)
     
     dataset_name_to_load=train_cfg.train_dataset_name
     if 'shards' in train_cfg.train_dataset_name:
-        print('Loading shards...')
+        if is_master():
+            logger.info('Loading shards...')
         total_shards=56
         dataset_name_to_load=[f'{train_cfg.train_dataset_path}/shards_{i}' for i in range(total_shards)]
     
@@ -92,12 +96,14 @@ def get_dataloaders(train_cfg: TrainConfig,vlm_cfg: VLMConfig):
         dataset_name_to_load=get_dataset_config_names(train_cfg.train_dataset_path)
     
     # Load and combine all training datasets
-    print('Load and combine all training datasets...')
+    if is_master():
+        logger.info('Load and combine all training datasets...')
     combined_train_data=[]
     for dataset_name in dataset_name_to_load:
         
-        print(f'>>>Loading dataset: {train_cfg.train_dataset_path} ...')
-        print(f'>>>Loading dataset: {dataset_name} ...')
+        if is_master():
+            logger.info(f'>>>Loading dataset: {train_cfg.train_dataset_path} ...')
+            logger.info(f'>>>Loading dataset: {dataset_name} ...')
         
         if 'shard_' in dataset_name:
             try:
@@ -105,7 +111,8 @@ def get_dataloaders(train_cfg: TrainConfig,vlm_cfg: VLMConfig):
                 combined_train_data.append(train_dateset)
                 continue
             except Exception as e:
-                print(f'[Warning:] Failed to load dataset shard: "{dataset_name}" from "{train_cfg.train_dataset_path}". Error:{e}')
+                if is_master():
+                    logger.warning(f'Failed to load dataset shard: "{dataset_name}" from "{train_cfg.train_dataset_path}". Error:{e}')
                 continue
         
         try:
@@ -115,8 +122,9 @@ def get_dataloaders(train_cfg: TrainConfig,vlm_cfg: VLMConfig):
                 streaming=train_cfg.stream_dataset,
                 on_bad_files='warn'
                 )['train']
-            print(f"datasets 全局缓存根目录：{datasets_config.HF_DATASETS_CACHE}")
-            print(f"数据集详情信息：\n{train_dataset.info}")
+            if is_master():
+                logger.info(f"datasets 全局缓存根目录：{datasets_config.HF_DATASETS_CACHE}")
+                logger.info(f"数据集详情信息：\n{train_dataset.info}")
             # print(f"本地数据文件路径：{train_dataset._data_files}")
             if train_cfg.stream_dataset:
                 next(iter(train_dataset)) # Check if the dataset is loaded correctly
@@ -126,7 +134,7 @@ def get_dataloaders(train_cfg: TrainConfig,vlm_cfg: VLMConfig):
             combined_train_data.append(train_dataset)
         except Exception as e:
             if is_master():
-                print(f"[Warning:] Failed to load dataset config '{dataset_name}' from '{train_cfg.train_dataset_path}'. Error: {e}")
+                logger.warning(f"Failed to load dataset config '{dataset_name}' from '{train_cfg.train_dataset_path}'. Error: {e}")
             continue
         
     if not combined_train_data:
@@ -135,15 +143,18 @@ def get_dataloaders(train_cfg: TrainConfig,vlm_cfg: VLMConfig):
     train_dataset=concatenate_datasets(combined_train_data)
     
     if not train_cfg.stream_dataset:
-        print("# Shuffle the training dataset, so train and val get equal contributions from all concatenated datasets  ")
+        if is_master():
+            logger.info("# Shuffle the training dataset, so train and val get equal contributions from all concatenated datasets  ")
         train_dataset=train_dataset.shuffle(seed=0)
     
     if is_ddp_initialized():  # We need to shard the dataset in DDP since we are using an iterable dataset instead of the distributed sampler
         train_dataset = train_dataset.shard(num_shards=get_world_size(), index=get_rank())
     
-    print("# train_dataset = train_dataset.shuffle(buffer_size=10000, seed=0) # Shuffle the training dataset, so train and val get equal contributions from all concatenated datasets")
+    if is_master():
+        logger.info("# train_dataset = train_dataset.shuffle(buffer_size=10000, seed=0) # Shuffle the training dataset, so train and val get equal contributions from all concatenated datasets")
     val_size = int(train_cfg.val_size/get_world_size())
-    print(f"Val size per GPU: {val_size}")
+    if is_master():
+        logger.info(f"Val size per GPU: {val_size}")
 
     if train_cfg.stream_dataset:
         val_ds = train_dataset.take(val_size)
@@ -230,18 +241,21 @@ def get_dataloaders(train_cfg: TrainConfig,vlm_cfg: VLMConfig):
     )
 
     # Warmup dataloaders to kickstart worker processes
-    print("Warming up dataloaders...")   
+    if is_master():
+        logger.info("Warming up dataloaders...")   
     iter_train_loader = iter(train_loader)
     iter_val_loader = iter(val_loader)
     try:
         next(iter_train_loader)
-        print(">>> Train loader warmup comlete...")
+        if is_master():
+            logger.info(">>> Train loader warmup complete...")
     except Exception as e:
         raise ValueError(f'Error warmup train loader: {e}')
     
     try:
         next(iter_val_loader)
-        print(">>> Val loader warmup complete...")
+        if is_master():
+            logger.info(">>> Val loader warmup complete...")
     except Exception as e:
         raise ValueError(f'Error warmup val loader: {e}')
         
@@ -272,12 +286,12 @@ def train(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
     train_loader, val_loader, iter_train_loader, iter_val_loader = get_dataloaders(train_cfg, vlm_cfg)
 
     if is_ddp_initialized():
-        print("Rank", get_rank(), "Waiting for all workers to get dataloaders...")
         if is_master():
-            print("Waiting for all workers to get dataloaders...")
+            logger.info("Rank %s Waiting for all workers to get dataloaders..." % get_rank())
+            logger.info("Waiting for all workers to get dataloaders...")
         dist.barrier(device_ids=int(os.environ["LOCAL_RANK"]))
         if is_master():
-            print("All workers have gotten dataloaders.")
+            logger.info("All workers have gotten dataloaders.")
 
     run_name = get_run_name(train_cfg, vlm_cfg)
     if train_cfg.log_wandb and is_master():
@@ -294,28 +308,31 @@ def train(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
         lmms_eval_step = "<lmms-eval-step>"
         # run.define_metric(name="lmms_eval/*", step_metric=lmms_eval_step) # TODO 如何使用swanlab替换wandb
 
-    print(">>> # Initialize model ...")
+    if is_master():
+        logger.info(">>> # Initialize model ...")
     if train_cfg.resume_from_vlm_checkpoint:
-        print(f"Resuming from VLM checkpoint: {vlm_cfg.vlm_checkpoint_path}")
+        if is_master():
+            logger.info(f"Resuming from VLM checkpoint: {vlm_cfg.vlm_checkpoint_path}")
         model = VisionLanguageModel.from_pretrained(vlm_cfg.vlm_checkpoint_path)
     else:
         model = VisionLanguageModel(vlm_cfg, load_backbone=vlm_cfg.vlm_load_backbone_weights)
     
     if is_master():
-        print(f"VLM initialized with {sum(p.numel() for p in model.parameters()):,} parameters") 
-        print(f"Training summary {'(global)' if is_ddp_initialized() else ''}: {-1*get_world_size()} samples, batch size {int(train_cfg.batch_size*get_world_size()*train_cfg.gradient_accumulation_steps)}{', training on ' + str(get_world_size()) + ' GPUs' if is_ddp_initialized() else ''}")
+        logger.info(f"VLM initialized with {sum(p.numel() for p in model.parameters()):,} parameters") 
+        logger.info(f"Training summary {'(global)' if is_ddp_initialized() else ''}: {-1*get_world_size()} samples, batch size {int(train_cfg.batch_size*get_world_size()*train_cfg.gradient_accumulation_steps)}{', training on ' + str(get_world_size()) + ' GPUs' if is_ddp_initialized() else ''}")
         if is_ddp_initialized():
-            print(f"Training summary per GPU: batch size {train_loader.batch_size}")
-        print(f"Validation summary{' (global)' if is_ddp_initialized() else ''}: {-1*get_world_size()} samples, batch size {int(train_cfg.batch_size*get_world_size()*train_cfg.gradient_accumulation_steps)}{', training on ' + str(get_world_size()) + ' GPUs' if is_ddp_initialized() else ''}")
+            logger.info(f"Training summary per GPU: batch size {train_loader.batch_size}")
+        logger.info(f"Validation summary{' (global)' if is_ddp_initialized() else ''}: {-1*get_world_size()} samples, batch size {int(train_cfg.batch_size*get_world_size()*train_cfg.gradient_accumulation_steps)}{', training on ' + str(get_world_size()) + ' GPUs' if is_ddp_initialized() else ''}")
         if is_ddp_initialized():
-            print(f"Validation summary per GPU: batch size {val_loader.batch_size}")
+            logger.info(f"Validation summary per GPU: batch size {val_loader.batch_size}")
 
     pstr2="""
     # Define optimizer groups
     # Since we have pretrained vision and language backbones, but a newly initialized modality projection layer, it doesn't make sense to train them with the same learning rate
     # You could opt to fully freeze the backbones and only train the MP layer, but finetuning them with a lower learning rate makes the training as a whole easier
     """
-    print(f">>> {pstr2} <<<")
+    if is_master():
+        logger.info(f">>> {pstr2} <<<")
     
     param_groups = []
     if train_cfg.lr_mp > 0:
@@ -338,9 +355,9 @@ def train(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
     all_params = [p for group in optimizer.param_groups for p in group['params']]
 
     device = (
-        torch.device("cuda") if torch.cuda.is_available()
-        else torch.device("mps") if hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
-        else torch.device("cpu")
+        torch.device("cuda") if torch.cuda.is_available() else
+        torch.device("mps") if hasattr(torch.backends, "mps") and torch.backends.mps.is_available() else
+        torch.device("cpu")
     )
     if device.type == "mps": # 当MPS不支持某算子时,自动切换到 CPU 执行，避免报错。
         if hasattr(torch.backends.mps,'enable_fallback_to_cpu'):
@@ -349,15 +366,18 @@ def train(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
             os.environ['PYTORCH_ENABLE_MPS_FALLBACK']='1'
         torch.mps.empty_cache()
     
-    print(f">>> Using device: {device}")
+    if is_master():
+        logger.info(f">>> Using device: {device}")
     model.to(device)
     
     if train_cfg.compile:
         model = torch.compile(model)
     if is_ddp_initialized():
-        print("Wrapping model for DDP")
+        if is_master():
+            logger.info("Wrapping model for DDP")
         model = wrap_model(model)
-        print("Model wrapped for DDP")
+        if is_master():
+            logger.info("Model wrapped for DDP")
 
     epoch_times = []
     best_val_loss = float('inf')
@@ -384,7 +404,8 @@ def train(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
         optimizer.zero_grad()
         data_load_start = time.time()
 
-        print("Starting training loop")
+        if is_master():
+            logger.info("Starting training loop")
         for i, batch in enumerate(synchronized_dataloader_step(iter_train_loader, is_ddp_initialized())):
             is_update_step = (i + 1) % train_cfg.gradient_accumulation_steps == 0
             batch_start_time = time.time()
@@ -425,18 +446,21 @@ def train(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
                     grad_norm = torch.nn.utils.clip_grad_norm_(all_params, max_norm=train_cfg.max_grad_norm)
 
                 param_group_idx = 0
-                print("# multimodel project layer optimizer update")
+                if is_master():
+                    logger.info("# multimodel project layer optimizer update")
                 if train_cfg.lr_mp > 0:
                     adj_lr_mp = get_learn_rate(global_step, train_cfg.lr_mp, train_cfg.max_training_steps)
                     optimizer.param_groups[param_group_idx]['lr'] = adj_lr_mp
                     param_group_idx += 1
-                print("# vision model optimizer update")
+                if is_master():
+                    logger.info("# vision model optimizer update")
                 if train_cfg.lr_vision_backbone > 0:
                     adj_lr_vision_backbone = get_learn_rate(global_step, train_cfg.lr_vision_backbone, train_cfg.max_training_steps)
                     optimizer.param_groups[param_group_idx]['lr'] = adj_lr_vision_backbone
                     param_group_idx += 1
 
-                print("# language model optimizer update")
+                if is_master():
+                    logger.info("# language model optimizer update")
                 if train_cfg.lr_language_backbone > 0:
                     adj_lr_language_backbone = get_learn_rate(global_step, train_cfg.lr_language_backbone, train_cfg.max_training_steps)
                     optimizer.param_groups[param_group_idx]['lr'] = adj_lr_language_backbone
@@ -467,7 +491,7 @@ def train(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
             accumulated_stats['images_per_sample'].extend(images_per_sample)
             
             if train_cfg.eval_in_epochs and global_step % train_cfg.eval_interval == 0 and is_update_step:
-                print("Starting evaluation")
+                if is_master():logger.info("Starting evaluation")
                 model.eval()
                 if device == "cuda":
                     torch.cuda.empty_cache()
@@ -476,7 +500,8 @@ def train(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
                     val_batches = 0
                     for batch in synchronized_dataloader_step(iter_val_loader, is_ddp_initialized()):
                         if val_batches > 64:
-                            print(f"Evaluated {val_batches} batches")
+                            if is_master():
+                                logger.info(f"Evaluated {val_batches} batches")
                             break
                         images = batch["images"]
                         input_ids = batch["input_ids"].to(device)
@@ -503,7 +528,8 @@ def train(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
                         if train_cfg.use_lmms_eval and global_step % (train_cfg.eval_interval*2) == 0:
                             # Submit evaluation job
                             cmd = f"sbatch eval.slurm {checkpoint_path_step} {global_step} {run_name} {train_cfg.lmms_eval_limit} {train_cfg.lmms_eval_tasks} {train_cfg.lmms_eval_batch_size}"
-                            print(f"Submitting evaluation job: {cmd}")
+                            if is_master():
+                                logger.info(f"Submitting evaluation job: {cmd}")
                             subprocess.run(cmd, shell=True)
 
                     if avg_val_loss < best_val_loss:
@@ -512,7 +538,7 @@ def train(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
                             best_model_path = checkpoint_path_step
                     
                     if is_master():
-                        print(f"Step: {global_step}, Val Loss: {avg_val_loss:.4f}, Tokens/s: {tokens_per_second:.2f}")
+                        logger.info(f"Step: {global_step}, Val Loss: {avg_val_loss:.4f}, Tokens/s: {tokens_per_second:.2f}")
                         if train_cfg.log_wandb:
                             swanlab.log({"val_loss": avg_val_loss}, step=global_step)
 
@@ -572,14 +598,17 @@ def train(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
                                         metrics = {f"lmms_eval/{key}": value for key, value in lmms_results.items()}
                                         metrics[lmms_eval_step] = eval_data['global_step']
                                         if logged_results_count > 0:
-                                            print(f"Logging more than one lmms-eval result for step {global_step}, try to avoid this.")
+                                            if is_master():
+                                                logger.info(f"Logging more than one lmms-eval result for step {global_step}, try to avoid this.")
                                         swanlab.log(metrics, step=global_step + logged_results_count)
                                         logged_results_count += 1
-                                        print(f"Logged lmms-eval results from step {eval_data['global_step']}")
+                                        if is_master():
+                                            logger.info(f"Logged lmms-eval results from step {eval_data['global_step']}")
 
                                     logged_eval_steps.add(step)
                             except (ValueError, KeyError, json.JSONDecodeError) as e:
-                                print(f"Warning: Could not process eval result file {result_file}. Error: {e}")
+                                if is_master():
+                                    logger.warning(f"Could not process eval result file {result_file}. Error: {e}")
                                 continue
                 
                 # ALL RANKS: Reset accumulators
@@ -626,7 +655,7 @@ def train(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
                          "epoch_duration": epoch_duration,
                          "epoch_tokens_per_second": epoch_tokens_per_second})
 
-            print(f"Epoch: {epoch}, Step: {global_step}/{train_cfg.max_training_steps}, Train Loss: {avg_train_loss:.4f} | Time: {epoch_duration:.2f}s | T/s: {epoch_tokens_per_second:.2f}")
+            logger.info(f"Epoch: {epoch}, Step: {global_step}/{train_cfg.max_training_steps}, Train Loss: {avg_train_loss:.4f} | Time: {epoch_duration:.2f}s | T/s: {epoch_tokens_per_second:.2f}")
 
     # Summary Statistics
     if is_master():
@@ -635,12 +664,13 @@ def train(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
         batch_size = int(train_cfg.batch_size*get_world_size()*train_cfg.gradient_accumulation_steps)
         total_samples_processed = batch_size * global_step
         avg_time_per_sample = total_training_time / total_samples_processed
-        print(f"Average time per epoch: {avg_epoch_time:.2f}s")
-        print(f"Average time per sample: {avg_time_per_sample:.4f}s")
+        logger.info(f"Average time per epoch: {avg_epoch_time:.2f}s")
+        logger.info(f"Average time per sample: {avg_time_per_sample:.4f}s")
 
         # Push the best model to the hub (Please set your user name in the config!)
         if vlm_cfg.hf_repo_name is not None and best_model_path:
-            print(f"Training complete. Pushing best model from {best_model_path} to Hugging Face Hub...")
+            if is_master():
+                logger.info(f"Training complete. Pushing best model from {best_model_path} to Hugging Face Hub...")
             hf_model = VisionLanguageModel.from_pretrained(best_model_path)
             hf_model.push_to_hub(vlm_cfg.hf_repo_name)
 
@@ -703,10 +733,10 @@ def main():
         PG_CPU = dist.new_group(backend="gloo")   # host‑RAM, zero GPU allocations
 
     if is_master():
-        print(">>> ---------- VLM Config ---------- <<<")
-        print(vlm_cfg.to_json())
-        print(">>> ---------- Train Config ---------- <<<")
-        print(train_cfg.to_json())
+        logger.info(">>> ---------- VLM Config ---------- <<<")
+        logger.info(vlm_cfg.to_json())
+        logger.info(">>> ---------- Train Config ---------- <<<")
+        logger.info(train_cfg.to_json())
 
     train(train_cfg, vlm_cfg)
 

@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from models.config import LLMConfig
+from src.models.config import LLMConfig
 from src.models.layers import CausalSelfAttention,MLP,LayerNorm
     
 class Block(nn.Module):

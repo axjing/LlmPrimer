@@ -18,8 +18,8 @@ import signal
 import warnings
 from contextlib import contextmanager
 from collections import deque
-from trainer.distributed import compute_init, autodetect_device_type
-from engine.utils_checkpoints import load_model
+from src.trainer.distributed import compute_init, autodetect_device_type
+from src.engine.utils_checkpoints import load_model
 
 # -----------------------------------------------------------------------------
 # Calculator tool helpers
